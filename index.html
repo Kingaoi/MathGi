@@ -2113,32 +2113,122 @@ function shakeScreen(){
 }
 
 /* ═══════════════════════════════════════════════════════════
-   FULLSCREEN (fallback للمتصفح)
+   FULLSCREEN MANAGER — ملء الشاشة الدائم
    ═══════════════════════════════════════════════════════════ */
 const fsToggleBtn = $('fsToggleBtn');
-function fsElement(){ return document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement; }
-function requestFullscreen(){
-  const el = htmlEl;
-  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
-  if (fn){ const r = fn.call(el, { navigationUI:'hide' }); if (r && r.catch) r.catch(()=>{}); }
+
+function fsElement(){
+  return document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
 }
-function exitFullscreen(){
-  const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
-  if (fn){ const r = fn.call(document); if (r && r.catch) r.catch(()=>{}); }
-}
-if (IS_TG && !tgAtLeast('8.0')) fsToggleBtn.style.display = 'none';   /* لا دعم لملء الشاشة في الإصدارات القديمة */
-fsToggleBtn.addEventListener('click', () => {
-  if (IS_TG){
-    try { tg.isFullscreen ? tg.exitFullscreen() : tg.requestFullscreen(); } catch(e){}
-    return;
+
+const FullscreenManager = {
+  /* إذا ضغط المستخدم زر الخروج يدوياً نتوقف عن الإجبار */
+  userOptedOut: false,
+
+  isActive(){
+    if (IS_TG) return !!(tgAtLeast('8.0') && tg.isFullscreen);
+    return !!fsElement();
+  },
+
+  enter(){
+    if (this.userOptedOut) return;
+    if (IS_TG){
+      try {
+        if (tgAtLeast('8.0') && !tg.isFullscreen) tg.requestFullscreen();
+      } catch(e){}
+      return;
+    }
+    if (fsElement()) return;
+    const el = htmlEl;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    if (fn){
+      try {
+        const r = fn.call(el, { navigationUI: 'hide' });
+        if (r && r.catch) r.catch(()=>{});
+      } catch(e){}
+    }
+  },
+
+  exit(){
+    if (IS_TG){
+      try { if (tgAtLeast('8.0') && tg.isFullscreen) tg.exitFullscreen(); } catch(e){}
+    } else {
+      const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+      if (fn){
+        try { const r = fn.call(document); if (r && r.catch) r.catch(()=>{}); } catch(e){}
+      }
+    }
+  },
+
+  toggle(){
+    if (this.isActive()){
+      /* المستخدم يريد الخروج → احترم اختياره ولا تُجبره على العودة */
+      this.userOptedOut = true;
+      this.exit();
+    } else {
+      this.userOptedOut = false;
+      this.enter();
+    }
+  },
+
+  init(){
+    /* إخفاء الزر في إصدارات Telegram القديمة (لا تدعم Fullscreen API) */
+    if (IS_TG && !tgAtLeast('8.0')) fsToggleBtn.style.display = 'none';
+
+    /* محاولة فورية عند الإقلاع — تعمل في Telegram 8.0+ */
+    this.enter();
+
+    if (IS_TG){
+      /* Telegram: إعادة الدخول تلقائياً لو خرج لأي سبب (إشعار، تصغير...) */
+      try {
+        tg.onEvent('fullscreenChanged', () => {
+          updateFsUI();
+          if (!tg.isFullscreen && !this.userOptedOut){
+            setTimeout(() => this.enter(), 150);
+          }
+        });
+      } catch(e){}
+      return;
+    }
+
+    /* المتصفح: نحتاج تفاعل مستخدم لدخول fullscreen.
+       نستمع لكل تفاعل ونحاول الدخول إن لم نكن داخل ملء الشاشة */
+    const tryOnGesture = () => {
+      if (this.userOptedOut) return;
+      if (!fsElement()) this.enter();
+    };
+    document.addEventListener('click', tryOnGesture, true);
+    document.addEventListener('touchstart', tryOnGesture, true);
+    document.addEventListener('keydown', tryOnGesture, true);
+
+    /* عند العودة للتطبيق / إعادة التركيز حاول إعادة تفعيل ملء الشاشة */
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) tryOnGesture();
+    });
+    window.addEventListener('focus', tryOnGesture);
   }
-  fsElement() ? exitFullscreen() : requestFullscreen();
-});
+};
+
 function updateFsUI(){
-  const a = IS_TG ? !!tg.isFullscreen : !!fsElement();
-  fsToggleBtn.innerHTML = a ? '<svg><use href="#i-compress"/></svg>' : '<svg><use href="#i-expand"/></svg>';
+  const a = FullscreenManager.isActive();
+  fsToggleBtn.innerHTML = a
+    ? '<svg><use href="#i-compress"/></svg>'
+    : '<svg><use href="#i-expand"/></svg>';
+  fsToggleBtn.classList.toggle('active', a);
+  fsToggleBtn.title = a
+    ? (currentLang === 'ar' ? 'إنهاء ملء الشاشة' : 'Exit fullscreen')
+    : t('btnFs');
 }
-['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(e => document.addEventListener(e, updateFsUI));
+
+fsToggleBtn.addEventListener('click', () => {
+  FullscreenManager.toggle();
+  SoundEngine.init(); SoundEngine.tick();
+});
+
+/* مزامنة الأيقونة مع تغيّرات المتصفح */
+['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(e =>
+  document.addEventListener(e, updateFsUI)
+);
 
 const soundToggleBtn = $('soundToggleBtn');
 soundToggleBtn.addEventListener('click', () => {
@@ -3050,7 +3140,7 @@ function startGame(){
   SoundEngine.init(); SoundEngine.resume();
 
   if (IS_TG){ try { tg.expand(); } catch(e){} }
-  else if (!fsElement()) requestFullscreen();
+  FullscreenManager.enter();
 
   PauseManager.paused = false;
   $('pauseOverlay').classList.remove('show');
@@ -3705,6 +3795,9 @@ async function shareResult(){
   /* 2) Telegram SDK */
   await initTelegram();
   Splash.setProgress(18, 'الاتصال بـ Telegram...');
+
+  /* 2.1) تفعيل ملء الشاشة الدائم */
+  FullscreenManager.init();
 
   /* 3) الخطوط */
   Splash.setProgress(26, 'تحميل الخطوط...');
