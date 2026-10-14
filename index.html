@@ -1131,6 +1131,7 @@ html[dir="rtl"] .ach-card.unlocked::before{ right:auto; left:4px; }
     <h2 id="pauseTitle" data-i18n="pauseTitle">اللعبة متوقفة مؤقتًا</h2>
     <p id="pauseDesc" data-i18n="pauseDesc">اضغط متابعة للاستئناف من حيث توقفت</p>
     <button class="btn btn-primary" id="resumeBtn" data-i18n="resumeBtn">متابعة</button>
+    <button class="btn" id="pauseQuitBtn" data-i18n="backToMenu" style="margin-top:8px">العودة للقائمة الرئيسية</button>
   </div>
 </div>
 
@@ -1272,7 +1273,7 @@ function updateTelegramBackButton(){
     else if (tg.disableClosingConfirmation) tg.disableClosingConfirmation();
   } catch(e){}
 
-  const shouldShow = historyOpen || pauseOpen || memOpen || gameActive || resultActive || mpTrans;
+  const shouldShow = historyOpen || pauseOpen || memOpen || gameActive || resultActive || mpTrans;   /* يبقى ظاهرًا دائمًا كي لا يغلق رجوع أندرويد التطبيق */
   try {
     if (shouldShow) tg.BackButton.show();
     else tg.BackButton.hide();
@@ -1282,15 +1283,18 @@ function updateTelegramBackButton(){
 function handleTelegramBack(){
   if ($('historyModal').classList.contains('show')){ closeHistory(); return; }
   if ($('pauseOverlay').classList.contains('show')){ PauseManager.resume(); return; }
-  if ($('screen-game').style.display === 'block' || $('screen-result').style.display === 'block'){
-    resetToMenu();
+  if ($('screen-result').style.display === 'block'){ resetToMenu(); return; }
+  /* أثناء اللعب: الرجوع لا يخرج، فقط يوقف اللعبة مؤقتًا (فيها زر متابعة) */
+  if ($('screen-game').style.display === 'block'){
+    if (!$('memoryOverlay').classList.contains('show')) PauseManager.pause();
     return;
   }
-  if ($('screen-mp-transition').classList.contains('show')){
-    resetToMenu();
-    return;
-  }
+  if ($('screen-mp-transition').classList.contains('show')) return;
   try { tg.close && tg.close(); } catch(e){}
+}
+
+function forceTgFullscreen(){
+  try { if (tgAtLeast('8.0') && !tg.isFullscreen) tg.requestFullscreen(); } catch(e){}
 }
 
 function initTelegram(){
@@ -1299,6 +1303,7 @@ function initTelegram(){
   try { tg.ready(); } catch(e){}
   try { tg.expand(); } catch(e){}
   try { if (tgAtLeast('7.7')) tg.disableVerticalSwipes(); } catch(e){}
+  forceTgFullscreen();
 
   try {
     const bg = (tg.colorScheme === 'dark') ? '#2a2118' : '#e8dcc0';
@@ -1317,7 +1322,8 @@ function initTelegram(){
   try {
     tg.onEvent('safeAreaChanged', syncSafeAreas);
     tg.onEvent('contentSafeAreaChanged', syncSafeAreas);
-    tg.onEvent('fullscreenChanged', () => { syncSafeAreas(); updateFsUI(); });
+    tg.onEvent('fullscreenChanged', () => { syncSafeAreas(); updateFsUI(); if (!tg.isFullscreen) setTimeout(forceTgFullscreen, 150); });
+    tg.onEvent('fullscreenFailed', () => {});
   } catch(e){}
   syncSafeAreas();
 
@@ -2113,122 +2119,51 @@ function shakeScreen(){
 }
 
 /* ═══════════════════════════════════════════════════════════
-   FULLSCREEN MANAGER — ملء الشاشة الدائم
+   FULLSCREEN (fallback للمتصفح)
    ═══════════════════════════════════════════════════════════ */
 const fsToggleBtn = $('fsToggleBtn');
-
-function fsElement(){
-  return document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
+function fsElement(){ return document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement; }
+function requestFullscreen(){
+  const el = htmlEl;
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+  if (fn){ const r = fn.call(el, { navigationUI:'hide' }); if (r && r.catch) r.catch(()=>{}); }
 }
-
-const FullscreenManager = {
-  /* إذا ضغط المستخدم زر الخروج يدوياً نتوقف عن الإجبار */
-  userOptedOut: false,
-
-  isActive(){
-    if (IS_TG) return !!(tgAtLeast('8.0') && tg.isFullscreen);
-    return !!fsElement();
-  },
-
-  enter(){
-    if (this.userOptedOut) return;
-    if (IS_TG){
-      try {
-        if (tgAtLeast('8.0') && !tg.isFullscreen) tg.requestFullscreen();
-      } catch(e){}
-      return;
-    }
-    if (fsElement()) return;
-    const el = htmlEl;
-    const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
-    if (fn){
-      try {
-        const r = fn.call(el, { navigationUI: 'hide' });
-        if (r && r.catch) r.catch(()=>{});
-      } catch(e){}
-    }
-  },
-
-  exit(){
-    if (IS_TG){
-      try { if (tgAtLeast('8.0') && tg.isFullscreen) tg.exitFullscreen(); } catch(e){}
-    } else {
-      const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
-      if (fn){
-        try { const r = fn.call(document); if (r && r.catch) r.catch(()=>{}); } catch(e){}
-      }
-    }
-  },
-
-  toggle(){
-    if (this.isActive()){
-      /* المستخدم يريد الخروج → احترم اختياره ولا تُجبره على العودة */
-      this.userOptedOut = true;
-      this.exit();
-    } else {
-      this.userOptedOut = false;
-      this.enter();
-    }
-  },
-
-  init(){
-    /* إخفاء الزر في إصدارات Telegram القديمة (لا تدعم Fullscreen API) */
-    if (IS_TG && !tgAtLeast('8.0')) fsToggleBtn.style.display = 'none';
-
-    /* محاولة فورية عند الإقلاع — تعمل في Telegram 8.0+ */
-    this.enter();
-
-    if (IS_TG){
-      /* Telegram: إعادة الدخول تلقائياً لو خرج لأي سبب (إشعار، تصغير...) */
-      try {
-        tg.onEvent('fullscreenChanged', () => {
-          updateFsUI();
-          if (!tg.isFullscreen && !this.userOptedOut){
-            setTimeout(() => this.enter(), 150);
-          }
-        });
-      } catch(e){}
-      return;
-    }
-
-    /* المتصفح: نحتاج تفاعل مستخدم لدخول fullscreen.
-       نستمع لكل تفاعل ونحاول الدخول إن لم نكن داخل ملء الشاشة */
-    const tryOnGesture = () => {
-      if (this.userOptedOut) return;
-      if (!fsElement()) this.enter();
-    };
-    document.addEventListener('click', tryOnGesture, true);
-    document.addEventListener('touchstart', tryOnGesture, true);
-    document.addEventListener('keydown', tryOnGesture, true);
-
-    /* عند العودة للتطبيق / إعادة التركيز حاول إعادة تفعيل ملء الشاشة */
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) tryOnGesture();
-    });
-    window.addEventListener('focus', tryOnGesture);
-  }
-};
-
-function updateFsUI(){
-  const a = FullscreenManager.isActive();
-  fsToggleBtn.innerHTML = a
-    ? '<svg><use href="#i-compress"/></svg>'
-    : '<svg><use href="#i-expand"/></svg>';
-  fsToggleBtn.classList.toggle('active', a);
-  fsToggleBtn.title = a
-    ? (currentLang === 'ar' ? 'إنهاء ملء الشاشة' : 'Exit fullscreen')
-    : t('btnFs');
+function exitFullscreen(){
+  const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+  if (fn){ const r = fn.call(document); if (r && r.catch) r.catch(()=>{}); }
 }
-
+fsToggleBtn.style.display = 'none';   /* ملء الشاشة دائم، لا حاجة للزر */   /* لا دعم لملء الشاشة في الإصدارات القديمة */
 fsToggleBtn.addEventListener('click', () => {
-  FullscreenManager.toggle();
-  SoundEngine.init(); SoundEngine.tick();
+  if (IS_TG){
+    try { tg.isFullscreen ? tg.exitFullscreen() : tg.requestFullscreen(); } catch(e){}
+    return;
+  }
+  fsElement() ? exitFullscreen() : requestFullscreen();
 });
+function updateFsUI(){
+  const a = IS_TG ? !!tg.isFullscreen : !!fsElement();
+  fsToggleBtn.innerHTML = a ? '<svg><use href="#i-compress"/></svg>' : '<svg><use href="#i-expand"/></svg>';
+}
+['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(e => document.addEventListener(e, updateFsUI));
 
-/* مزامنة الأيقونة مع تغيّرات المتصفح */
-['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(e =>
-  document.addEventListener(e, updateFsUI)
-);
+/* إبقاء المتصفح بوضع ملء الشاشة: أول لمسة بعد أي خروج تعيده */
+if (!IS_TG){
+  const reFs = () => { if (!fsElement()) requestFullscreen(); };
+  document.addEventListener('pointerdown', reFs, { passive:true });
+}
+
+/* منع زر الرجوع في المتصفح أثناء اللعب */
+const isPlaying = () => $('screen-game').style.display === 'block' || $('screen-mp-transition').classList.contains('show');
+function armBackTrap(){ try { history.pushState({mg:1}, '', location.href); } catch(e){} }
+armBackTrap();
+window.addEventListener('popstate', () => {
+  if (isPlaying()){ armBackTrap(); return; }
+  if ($('pauseOverlay').classList.contains('show')){ armBackTrap(); PauseManager.resume(); return; }
+  if ($('historyModal').classList.contains('show')){ armBackTrap(); closeHistory(); return; }
+  if ($('screen-result').style.display === 'block'){ armBackTrap(); resetToMenu(); return; }
+  armBackTrap();
+});
+window.addEventListener('beforeunload', e => { if (isPlaying()){ e.preventDefault(); e.returnValue = ''; } });
 
 const soundToggleBtn = $('soundToggleBtn');
 soundToggleBtn.addEventListener('click', () => {
@@ -2270,6 +2205,7 @@ const PauseManager = {
 document.addEventListener('visibilitychange', () => { if (document.hidden) PauseManager.pause(); });
 window.addEventListener('blur', () => PauseManager.pause());
 window.addEventListener('pagehide', () => PauseManager.pause());
+$('pauseQuitBtn').addEventListener('click', () => { resetToMenu(); });
 $('resumeBtn').addEventListener('click', () => { PauseManager.resume(); SoundEngine.tick(); });
 
 /* ═══════════════════════════════════════════════════════════
@@ -3140,7 +3076,7 @@ function startGame(){
   SoundEngine.init(); SoundEngine.resume();
 
   if (IS_TG){ try { tg.expand(); } catch(e){} }
-  FullscreenManager.enter();
+  else if (!fsElement()) requestFullscreen();
 
   PauseManager.paused = false;
   $('pauseOverlay').classList.remove('show');
@@ -3795,9 +3731,6 @@ async function shareResult(){
   /* 2) Telegram SDK */
   await initTelegram();
   Splash.setProgress(18, 'الاتصال بـ Telegram...');
-
-  /* 2.1) تفعيل ملء الشاشة الدائم */
-  FullscreenManager.init();
 
   /* 3) الخطوط */
   Splash.setProgress(26, 'تحميل الخطوط...');
