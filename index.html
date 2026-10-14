@@ -310,16 +310,24 @@ html[data-theme="dark"] .splash-screen .brand-logo-splash .lg-gi{ fill:#38D6B4; 
   margin-bottom:16px;
 }
 
+/* نفس بنية نافذة السجل: غلاف ثابت (fixed) + حاوية داخلية وحيدة هي التي تتمرر */
 main.card.card-pinned{
-  position: fixed; top: calc(var(--safe-top) + 146px);
-  left: 50%; transform: translateX(-50%);
-  width: calc(100% - 28px); max-width: 540px;
-  max-height: calc(var(--app-height) - var(--safe-top) - var(--safe-bottom) - 166px);
-  overflow-y: auto; overscroll-behavior: contain;
-  touch-action: pan-y; -webkit-overflow-scrolling: touch;
-  z-index: 45; margin-bottom: 0; scrollbar-width: none;
+  position: fixed; top: var(--card-top, calc(var(--safe-top) + 146px));
+  left: 14px; right: 14px; margin: 0 auto;
+  width: auto; max-width: 540px;
+  max-height: calc(min(100dvh, var(--app-height)) - var(--card-top, calc(var(--safe-top) + 146px)) - var(--safe-bottom) - 20px);
+  display: flex; flex-direction: column;
+  overflow: hidden; padding: 0;
+  z-index: 45; margin-bottom: 0;
 }
-main.card.card-pinned::-webkit-scrollbar{ display: none; }
+main.card.card-pinned > #screen-menu{
+  flex: 1; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 18px 18px 24px;
+  touch-action: pan-y; overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+main.card.card-pinned > #screen-menu::-webkit-scrollbar{ display: none; }
 
 .card-mini{
   background:var(--cream-bg);border:1.5px solid var(--cream-line);
@@ -1237,6 +1245,17 @@ const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp 
 const IS_TG = !!tg && (!!tg.initData || (tg.platform && tg.platform !== 'unknown'));
 const tgAtLeast = v => { try { return IS_TG && tg.isVersionAtLeast(v); } catch(e){ return false; } };
 
+/* يضع الصندوق دائمًا تحت الآية مباشرة حتى لو صارت بسطرين (كانت تغطي أعلى الصندوق وتبتلع اللمس) */
+function syncCardTop(){
+  const hero = document.querySelector('.hero');
+  if (!hero) return;
+  const b = hero.getBoundingClientRect().bottom;
+  if (b > 0) document.documentElement.style.setProperty('--card-top', Math.ceil(b + 10) + 'px');
+}
+window.addEventListener('load', syncCardTop);
+window.addEventListener('resize', syncCardTop);
+try { new ResizeObserver(syncCardTop).observe(document.querySelector('.hero')); } catch(e){}
+
 function syncViewportHeight(){
   if (!IS_TG) return;
   const h = (tg.viewportStableHeight && tg.viewportStableHeight > 0)
@@ -1322,7 +1341,7 @@ function initTelegram(){
   try {
     tg.onEvent('safeAreaChanged', syncSafeAreas);
     tg.onEvent('contentSafeAreaChanged', syncSafeAreas);
-    tg.onEvent('fullscreenChanged', () => { syncSafeAreas(); updateFsUI(); if (!tg.isFullscreen) setTimeout(forceTgFullscreen, 150); });
+    tg.onEvent('fullscreenChanged', () => { syncViewportHeight(); updateFsUI(); if (!tg.isFullscreen) setTimeout(forceTgFullscreen, 150); });
     tg.onEvent('fullscreenFailed', () => {});
   } catch(e){}
   syncSafeAreas();
@@ -1798,6 +1817,7 @@ function cycleLanguage(){
 }
 
 $('langToggleBtn').addEventListener('click', () => {
+  if (isPlaying() || PauseManager.paused) return;   /* تغيير اللغة أثناء السؤال كان يعيد رسم الواجهة */
   cycleLanguage();
   SoundEngine.init(); SoundEngine.tick();
 });
@@ -1830,10 +1850,13 @@ function hasScrollableAncestor(el){
   }
   return false;
 }
-document.addEventListener('touchmove', (e) => {
-  if (e.touches && e.touches.length > 1) return;   /* سماح بالتكبير وما شابه */
-  if (!hasScrollableAncestor(e.target)) e.preventDefault();
-}, { passive: false });
+/* داخل تيليجرام لا نسجّل هذا المعالج أبدًا: يعطّل التمرير السلس ويجعله متقطعًا، وتيليجرام يتكفل بمنع السحب عبر disableVerticalSwipes */
+if (!IS_TG){
+  document.addEventListener('touchmove', (e) => {
+    if (e.touches && e.touches.length > 1) return;
+    if (!hasScrollableAncestor(e.target)) e.preventDefault();
+  }, { passive: false });
+}
 
 /* ═══════════════════════════════════════════════════════════
    THEME
@@ -2545,6 +2568,7 @@ const HistoryManager = {
    ═══════════════════════════════════════════════════════════ */
 const historyModal = $('historyModal');
 function openHistory(){
+  if (isPlaying() || PauseManager.paused) return;   /* لا نافذة سجل أثناء اللعب: كانت تفتح فوق السؤال والمؤقت يعمل */
   HistoryManager.render();
   historyModal.classList.add('show');
   document.body.classList.add('modal-open');
@@ -3073,6 +3097,7 @@ function switchScreen(name){
   }
   const wrap = document.querySelector('.wrap');
   if (wrap) wrap.scrollTop = 0;
+  const menuEl = $('screen-menu'); if (menuEl) menuEl.scrollTop = 0;
   updateTelegramBackButton();
 }
 
@@ -3116,6 +3141,9 @@ function updateDailyStreakOnDone(){
    GAME FLOW
    ═══════════════════════════════════════════════════════════ */
 function startGame(){
+  const nowTs = Date.now();
+  if (nowTs - (state.lastStartTs || 0) < 900) return;   /* نقرتان سريعتان على ابدأ */
+  state.lastStartTs = nowTs;
   SoundEngine.init(); SoundEngine.resume();
 
   if (IS_TG){ try { tg.expand(); } catch(e){} }
