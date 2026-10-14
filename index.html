@@ -2199,6 +2199,15 @@ const PauseManager = {
     const overlay = $('pauseOverlay');
     if (overlay) overlay.classList.remove('show');
     SoundEngine.init(); SoundEngine.resume();
+    /* منع استغلال الإيقاف للتفكير: خصم ثانيتين من السؤال الحالي (أو 3 ثوانٍ في Time Attack) */
+    if (!state.isLocked && !state.ended){
+      if (state.mode === 'timeattack'){
+        state.timeAttackRemaining = Math.max(1, state.timeAttackRemaining - 3); updateTimeAttackUI();
+      } else if (state.timeLeft > 1){
+        state.timeLeft = Math.max(1, state.timeLeft - 2);
+        $('timer-display').textContent = state.timeLeft; updateRing(state.timeLeft, state.maxTime);
+      }
+    }
     updateTelegramBackButton();
   }
 };
@@ -2214,10 +2223,12 @@ $('resumeBtn').addEventListener('click', () => { PauseManager.resume(); SoundEng
 const XP = {
   get(){ return parseInt(localStorage.getItem('mathgi_xp') || '0'); },
   add(n){ localStorage.setItem('mathgi_xp', String(this.get() + n)); },
+  /* منحنى صعب: المستوى n يحتاج 1000 × (n-1)² من الـ XP (م2=1,000 • م5=16,000 • م10=81,000) */
   level(xp){
-    return Math.floor(Math.sqrt((xp || this.get()) / 30)) + 1;
+    const v = (xp === undefined || xp === null) ? this.get() : xp;
+    return Math.min(100, Math.floor(Math.sqrt(Math.max(0, v) / 1000)) + 1);
   },
-  xpForLevel(lv){ return (lv - 1) * (lv - 1) * 30; },
+  xpForLevel(lv){ return (lv - 1) * (lv - 1) * 1000; },
   progress(){
     const xp = this.get();
     const lv = this.level(xp);
@@ -2229,7 +2240,8 @@ const XP = {
   },
   grant(points){
     const before = this.level();
-    const gained = Math.max(1, Math.round(points / 8));
+    /* كل 10 نقاط = 1 XP، وبحد أقصى 300 XP للعبة الواحدة لمنع التزوير بالأوضاع المفتوحة */
+    const gained = Math.min(300, Math.max(1, Math.round(points / 10)));
     this.add(gained);
     const after = this.level();
     updateLevelBadge();
@@ -2551,6 +2563,9 @@ const state = {
   score: 0,
   questionIndex: 0,
   totalQuestions: 10,
+  sid: 0,
+  ended: false,
+  timeAttackElapsed: 0,
   timeLeft: 12,
   maxTime: 12,
   timerInterval: null,
@@ -2688,9 +2703,15 @@ function shouldRevisit(){
 function makeOptions(answer, spread){
   const opts = [answer];
   const usedSpread = spread || 8;
-  while (opts.length < 4){
+  let safety = 0;
+  while (opts.length < 4 && safety++ < 80){
     const wrong = answer + Math.round((state.rng() - 0.5) * usedSpread * 2);
     if (wrong >= 0 && !opts.includes(wrong) && wrong !== answer) opts.push(wrong);
+  }
+  /* شبكة أمان: إن لم تكفِ المحاولات نملأ الخيارات بأقرب أرقام مختلفة (يمنع التجمّد) */
+  for (let d = 1; opts.length < 4 && d < 200; d++){
+    if (answer + d >= 0 && !opts.includes(answer + d)) opts.push(answer + d);
+    if (opts.length < 4 && answer - d >= 0 && !opts.includes(answer - d)) opts.push(answer - d);
   }
   return opts;
 }
@@ -3081,12 +3102,18 @@ function startGame(){
   PauseManager.paused = false;
   $('pauseOverlay').classList.remove('show');
 
+  /* جلسة جديدة: تُبطل كل المؤقتات والاستدعاءات المتأخرة من أي لعبة سابقة */
+  clearInterval(state.timerInterval); clearInterval(state.aiInterval); clearInterval(state.timeAttackTimer);
+  state.sid++; state.ended = false; state.pauseCount = 0;
+
   if (state.mode === 'daily'){
     const status = checkDailyStatus();
-    if (status === 'done'){
+    /* منع إعادة التحدي اليومي بعد رؤية أسئلته (حتى لو خرج اللاعب قبل النهاية) */
+    if (status === 'done' || localStorage.getItem('mathgi_daily_attempt') === getDailyKey()){
       Toast.show(t('dailyAlready'), '⏰', 2400);
       return;
     }
+    try { localStorage.setItem('mathgi_daily_attempt', getDailyKey()); } catch(e){}
     const seed = dailySeedFromKey();
     state.dailySeed = seed;
     state.rng = mulberry32(seed);
@@ -3161,10 +3188,13 @@ function startGame(){
 
 function startAITimer(){
   clearInterval(state.aiInterval);
-  if (state.mode === 'timeattack') return;
+  /* خصم الذكاء الاصطناعي يعمل فقط في الكلاسيكي واليومي والبقاء؛ في بقية الأوضاع لا شيء يخفضه فكان يُنهي اللعبة قسرًا */
+  if (!['classic','daily','survival'].includes(state.mode)) return;
+  const sid = state.sid;
   const speeds = { easy: 800, medium: 600, hard: 450, expert: 350 };
   const steps = { easy: 1, medium: 1.2, hard: 1.5, expert: 2 };
   state.aiInterval = setInterval(() => {
+    if (sid !== state.sid || state.ended){ clearInterval(state.aiInterval); return; }
     if (PauseManager.paused) return;
     if (state.mode === 'survival'){
       state.aiProgress = Math.min(100, state.aiProgress + 0.5);
@@ -3180,12 +3210,17 @@ function startAITimer(){
 function startTimeAttackTimer(){
   clearInterval(state.timeAttackTimer);
   state.timeAttackRemaining = 60;
+  state.timeAttackElapsed = 0;
   updateTimeAttackUI();
+  const sid = state.sid;
   state.timeAttackTimer = setInterval(() => {
+    if (sid !== state.sid || state.ended){ clearInterval(state.timeAttackTimer); return; }
     if (PauseManager.paused) return;
     state.timeAttackRemaining--;
+    state.timeAttackElapsed++;
     updateTimeAttackUI();
-    if (state.timeAttackRemaining <= 0){
+    /* سقف صارم 120 ثانية فعلية مهما كان الوقت المتبقي */
+    if (state.timeAttackRemaining <= 0 || state.timeAttackElapsed >= 120){
       clearInterval(state.timeAttackTimer);
       endGame(true);
     }
@@ -3215,7 +3250,9 @@ function startPerQuestionTimer(){
   state.timeLeft = state.maxTime;
   $('timer-display').textContent = state.timeLeft;
   updateRing(state.timeLeft, state.maxTime);
+  const sidQ = state.sid;
   state.timerInterval = setInterval(() => {
+    if (sidQ !== state.sid || state.ended){ clearInterval(state.timerInterval); return; }
     if (PauseManager.paused) return;
     state.timeLeft--;
     $('timer-display').textContent = Math.max(0, state.timeLeft);
@@ -3257,10 +3294,12 @@ function showMemoryOverlay(number, duration, onDone){
   };
   requestAnimationFrame(tick);
 
+  const sidM = state.sid;
   setTimeout(() => {
     overlay.classList.remove('show');
     updateTelegramBackButton();
-    setTimeout(onDone, 250);
+    if (sidM !== state.sid || state.ended) return;
+    setTimeout(() => { if (sidM === state.sid && !state.ended) onDone(); }, 250);
   }, duration);
 }
 
@@ -3432,7 +3471,7 @@ function handleAnswer(correct, btnEl, evt, selectedValue){
     state.streak++;
     state.maxStreak = Math.max(state.maxStreak, state.streak);
 
-    if (state.streak >= 7) state.comboMultiplier = 3;
+    if (state.streak >= 7) state.comboMultiplier = 2.5;
     else if (state.streak >= 5) state.comboMultiplier = 2;
     else if (state.streak >= 3) state.comboMultiplier = 1.5;
     else if (state.streak >= 2) state.comboMultiplier = 1.2;
@@ -3440,7 +3479,12 @@ function handleAnswer(correct, btnEl, evt, selectedValue){
 
     let points = 0;
     if (state.mode === 'timeattack') points = 50 * state.comboMultiplier;
-    else points = ((state.timeLeft * 10) + 40) * state.comboMultiplier;
+    else {
+      /* نقاط موحّدة: 40 + حتى 100 حسب نسبة الوقت المتبقي، × معامل الصعوبة (قبلاً كان السهل يعطي أكثر من الخبير) */
+      const ratio = state.maxTime > 0 ? Math.max(0, Math.min(1, state.timeLeft / state.maxTime)) : 0;
+      const diffMul = { easy: 1, medium: 1.5, hard: 2, expert: 3 }[state.difficulty] || 1;
+      points = (40 + 100 * ratio) * diffMul * state.comboMultiplier;
+    }
     points = Math.round(points);
     state.score += points;
 
@@ -3469,7 +3513,7 @@ function handleAnswer(correct, btnEl, evt, selectedValue){
     if (state.mode === 'multiplayer') state.mpScores[state.mpCurrentPlayer - 1] = state.score;
 
     if (state.mode === 'timeattack'){
-      state.timeAttackRemaining = Math.min(99, state.timeAttackRemaining + 2);
+      state.timeAttackRemaining = Math.min(60, state.timeAttackRemaining + 1);
     }
   } else {
     state.wrongCount++;
@@ -3497,10 +3541,15 @@ function handleAnswer(correct, btnEl, evt, selectedValue){
       state.aiProgress = Math.min(100, state.aiProgress + 12);
       updateAIUI();
     }
+    if (state.mode === 'timeattack'){
+      state.timeAttackRemaining = Math.max(0, state.timeAttackRemaining - 3);
+      updateTimeAttackUI();
+      if (state.timeAttackRemaining <= 0){ const sid0 = state.sid; setTimeout(() => { if (sid0 === state.sid) endGame(true); }, 400); return; }
+    }
     if (state.mode === 'survival'){
       state.lives--;
       $('lives-display').textContent = state.lives;
-      if (state.lives <= 0){ setTimeout(() => endGame(false), 800); return; }
+      if (state.lives <= 0){ const sid1 = state.sid; setTimeout(() => { if (sid1 === state.sid) endGame(false); }, 800); return; }
     }
     recordMiss(q);
   }
@@ -3514,7 +3563,9 @@ function handleAnswer(correct, btnEl, evt, selectedValue){
   qBox.classList.remove('enter');
   qBox.classList.add('exit');
 
+  const sidA = state.sid;
   setTimeout(() => {
+    if (sidA !== state.sid || state.ended) return;
     qBox.classList.remove('exit');
     if (state.mode === 'timeattack'){
       if (state.timeAttackRemaining > 0) nextQuestion();
@@ -3576,6 +3627,8 @@ $('mp-next-btn').addEventListener('click', () => {
    END GAME
    ═══════════════════════════════════════════════════════════ */
 function endGame(won){
+  if (state.ended) return;      /* يمنع تكرار منح الـ XP والسجل إذا استُدعيت مرتين */
+  state.ended = true;
   clearInterval(state.timerInterval);
   clearInterval(state.aiInterval);
   clearInterval(state.timeAttackTimer);
@@ -3683,6 +3736,9 @@ function endGame(won){
    RESET + RETRY + SHARE
    ═══════════════════════════════════════════════════════════ */
 function resetToMenu(){
+  clearInterval(state.timerInterval); clearInterval(state.aiInterval); clearInterval(state.timeAttackTimer);
+  state.sid++; state.ended = true;      /* أي مؤقت أو استدعاء متأخر يتوقف فورًا */
+  $('memoryOverlay').classList.remove('show');
   Confetti.stop();
   Particles.clear();
   $('vignette').classList.remove('active');
