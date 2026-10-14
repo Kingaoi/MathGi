@@ -1819,9 +1819,20 @@ document.addEventListener('keydown', e => {
   }
 });
 
+/* منع سحب الصفحة كاملة (bounce) مع السماح بالتمرير داخل أي عنصر قابل للتمرير */
+function hasScrollableAncestor(el){
+  while (el && el !== document.body && el !== document.documentElement){
+    if (el.nodeType === 1){
+      const st = getComputedStyle(el);
+      if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 1) return true;
+    }
+    el = el.parentElement;
+  }
+  return false;
+}
 document.addEventListener('touchmove', (e) => {
-  const wrap = e.target.closest && e.target.closest('.wrap, .modal-body, main.card, .pause-overlay, .memory-overlay, .modal-sheet, .mode-grid');
-  if (!wrap) e.preventDefault();
+  if (e.touches && e.touches.length > 1) return;   /* سماح بالتكبير وما شابه */
+  if (!hasScrollableAncestor(e.target)) e.preventDefault();
 }, { passive: false });
 
 /* ═══════════════════════════════════════════════════════════
@@ -2999,9 +3010,20 @@ function pickGenerator(mode){
   }
 }
 
+function shuffleOptions(arr, rng){
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--){
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function generateQuestion(){
   const gen = pickGenerator(state.mode);
   let q = gen();
+  /* الإجابة الصحيحة كانت تبقى في أول موضع في بعض المولّدات؛ نخلط الخيارات دائمًا */
+  if (Array.isArray(q.options)) q.options = shuffleOptions(q.options, state.rng || Math.random);
   const key = q.display || '';
   if (state.recentQuestions.includes(key) && q.type === 'classic'){
     q = genClassic();
